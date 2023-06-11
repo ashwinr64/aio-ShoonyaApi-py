@@ -122,6 +122,8 @@ class NorenApi:
         self.__market_status_messages = []
         self.__exchange_messages = []
 
+        self.session = requests.Session()
+
     def __ws_run_forever(self):
 
         while self.__stop_event.is_set() == False:
@@ -374,7 +376,7 @@ class NorenApi:
             payload += f'&jKey={self.__susertoken}'
 
         reportmsg(payload)
-        res = requests.post(url, data=payload, headers=headers)
+        res = self.session.post(url, data=payload, headers=headers)
         reportmsg(res.text)
         res = json.loads(res.text)
 

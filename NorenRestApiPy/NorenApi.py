@@ -259,23 +259,15 @@ class NorenApi:
             "appkey": app_key,
             "imei": imei,
         }
-        payload = f'jData={json.dumps(values)}'
-        reportmsg(f"Req:{payload}")
+        res_dict = self.send_payload(url, values, is_authorized=False)
 
-        res = requests.post(url, data=payload)
-        reportmsg(f"Reply:{res.text}")
+        if res_dict:
+            self.__username = userid
+            self.__accountid = userid
+            self.__password = password
+            self.__susertoken = res_dict['susertoken']
 
-        resDict = json.loads(res.text)
-        if resDict['stat'] != 'Ok':
-            return None
-
-        self.__username = userid
-        self.__accountid = userid
-        self.__password = password
-        self.__susertoken = resDict['susertoken']
-        # reportmsg(self.__susertoken)
-
-        return resDict
+        return res_dict
 
     def set_session(self, userid, password, usertoken):
 
@@ -297,15 +289,7 @@ class NorenApi:
 
         # prepare the data
         values = {"source": "API", "uid": userid, "pan": pan, "dob": dob}
-        payload = f'jData={json.dumps(values)}'
-        reportmsg(f"Req:{payload}")
-
-        res = requests.post(url, data=payload)
-        reportmsg(f"Reply:{res.text}")
-
-        resDict = json.loads(res.text)
-
-        return None if resDict['stat'] != 'Ok' else resDict
+        return self.send_payload(url, values, is_authorized=False)
 
     def logout(self):
         config = NorenApi.__service_config
@@ -317,28 +301,22 @@ class NorenApi:
         values = {'ordersource': 'API', "uid": self.__username}
         payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
 
-        reportmsg(payload)
+        res_dict = self.send_payload(url, values)
 
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
+        if res_dict:
+            self.__username = None
+            self.__accountid = None
+            self.__password = None
+            self.__susertoken = None
 
-        resDict = json.loads(res.text)
-        if resDict['stat'] != 'Ok':
-            return None
-
-        self.__username = None
-        self.__accountid = None
-        self.__password = None
-        self.__susertoken = None
-
-        return resDict
+        return res_dict
 
     def subscribe(self, instrument, feed_type=FeedType.TOUCHLINE):
         values = {}
 
-        if (feed_type == FeedType.TOUCHLINE):
+        if feed_type == FeedType.TOUCHLINE:
             values['t'] = 't'
-        elif (feed_type == FeedType.SNAPQUOTE):
+        elif feed_type == FeedType.SNAPQUOTE:
             values['t'] = 'd'
         else:
             values['t'] = str(feed_type)
@@ -378,15 +356,7 @@ class NorenApi:
         reportmsg(url)
         # prepare the data
         values = {'ordersource': 'API', "uid": self.__username}
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
-
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        resDict = json.loads(res.text)
-        return None if resDict['stat'] != 'Ok' else resDict
+        return self.send_payload(url, values)
 
     def get_watch_list(self, wlname):
         config = NorenApi.__service_config
@@ -396,15 +366,27 @@ class NorenApi:
         reportmsg(url)
         # prepare the data
         values = {'ordersource': 'API', "uid": self.__username, "wlname": wlname}
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
+        return self.send_payload(url, values)
+
+    def send_payload(self, url, values, expected_return_type=None, is_authorized=True, headers=None):
+        payload = f'jData={json.dumps(values)}'
+        if is_authorized:
+            payload += f'&jKey={self.__susertoken}'
 
         reportmsg(payload)
-
-        res = requests.post(url, data=payload)
+        res = requests.post(url, data=payload, headers=headers)
         reportmsg(res.text)
+        res = json.loads(res.text)
 
-        resDict = json.loads(res.text)
-        return None if resDict['stat'] != 'Ok' else resDict
+        success = None
+        if (
+                expected_return_type == 'list'
+                and type(res) == list
+                or expected_return_type != 'list'
+                and res['stat'] == 'Ok'
+        ):
+            success = True
+        return res if success else None
 
     def add_watch_list_scrip(self, wlname, instrument):
         config = NorenApi.__service_config
@@ -421,15 +403,7 @@ class NorenApi:
             if type(instrument) == list
             else instrument,
         }
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
-
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        resDict = json.loads(res.text)
-        return None if resDict['stat'] != 'Ok' else resDict
+        return self.send_payload(url, values)
 
     def delete_watch_list_scrip(self, wlname, instrument):
         config = NorenApi.__service_config
@@ -446,15 +420,7 @@ class NorenApi:
             if type(instrument) == list
             else instrument,
         }
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
-
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        resDict = json.loads(res.text)
-        return None if resDict['stat'] != 'Ok' else resDict
+        return self.send_payload(url, values)
 
     def place_order(self, buy_or_sell, product_type,
                     exchange, tradingsymbol, quantity, discloseqty,
@@ -486,15 +452,7 @@ class NorenApi:
             if trail_price != 0.0:
                 values["trailprc"] = str(trail_price)
 
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
-
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        resDict = json.loads(res.text)
-        return None if resDict['stat'] != 'Ok' else resDict
+        return self.send_payload(url, values)
 
     def modify_order(self, orderno, exchange, tradingsymbol, newquantity,
                      newprice_type, newprice=0.0, newtrigger_price=None, bookloss_price=0.0, bookprofit_price=0.0,
@@ -527,15 +485,7 @@ class NorenApi:
         if bookprofit_price != 0.0:
             values["bpprc"] = str(bookprofit_price)
 
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
-
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        resDict = json.loads(res.text)
-        return None if resDict['stat'] != 'Ok' else resDict
+        return self.send_payload(url, values)
 
     def cancel_order(self, orderno):
         config = NorenApi.__service_config
@@ -550,15 +500,7 @@ class NorenApi:
             "uid": self.__username,
             "norenordno": str(orderno),
         }
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
-
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        print(res.text)
-
-        resDict = json.loads(res.text)
-        return None if resDict['stat'] != 'Ok' else resDict
+        return self.send_payload(url, values)
 
     def exit_order(self, orderno, product_type):
         config = NorenApi.__service_config
@@ -574,15 +516,7 @@ class NorenApi:
             "norenordno": orderno,
             "prd": product_type,
         }
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
-
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        resDict = json.loads(res.text)
-        return None if resDict['stat'] != 'Ok' else resDict
+        return self.send_payload(url, values)
 
     def position_product_conversion(self, exchange, tradingsymbol, quantity, new_product_type, previous_product_type,
                                     buy_or_sell, day_or_cf):
@@ -600,16 +534,7 @@ class NorenApi:
                   "tsym": urllib.parse.quote_plus(tradingsymbol), "qty": str(quantity), "prd": new_product_type,
                   "prevprd": previous_product_type, "trantype": buy_or_sell, "postype": day_or_cf}
 
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
-
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        resDict = json.loads(res.text)
-
-        return None if resDict['stat'] != 'Ok' else resDict
+        return self.send_payload(url, values)
 
     def single_order_history(self, orderno):
         config = NorenApi.__service_config
@@ -620,16 +545,8 @@ class NorenApi:
 
         # prepare the data
         values = {'ordersource': 'API', "uid": self.__username, "norenordno": orderno}
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
 
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        resDict = json.loads(res.text)
-        # error is a json with stat and msg wchih we printed earlier.
-        return None if type(resDict) != list else resDict
+        return self.send_payload(url, values, expected_return_type="list")
 
     def get_order_book(self):
         config = NorenApi.__service_config
@@ -640,17 +557,8 @@ class NorenApi:
 
         # prepare the data
         values = {'ordersource': 'API', "uid": self.__username}
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
 
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        resDict = json.loads(res.text)
-
-        # error is a json with stat and msg wchih we printed earlier.
-        return None if type(resDict) != list else resDict
+        return self.send_payload(url, values, expected_return_type="list")
 
     def get_trade_book(self):
         config = NorenApi.__service_config
@@ -665,17 +573,8 @@ class NorenApi:
             "uid": self.__username,
             "actid": self.__accountid,
         }
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
 
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        resDict = json.loads(res.text)
-
-        # error is a json with stat and msg wchih we printed earlier.
-        return None if type(resDict) != list else resDict
+        return self.send_payload(url, values, expected_return_type="list")
 
     def searchscrip(self, exchange, searchtext):
         config = NorenApi.__service_config
@@ -690,16 +589,7 @@ class NorenApi:
 
         values = {"uid": self.__username, "exch": exchange, "stext": urllib.parse.quote_plus(searchtext)}
 
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
-
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        resDict = json.loads(res.text)
-
-        return None if resDict['stat'] != 'Ok' else resDict
+        return self.send_payload(url, values)
 
     def get_option_chain(self, exchange, tradingsymbol, strikeprice, count=2):
         config = NorenApi.__service_config
@@ -711,16 +601,7 @@ class NorenApi:
         values = {"uid": self.__username, "exch": exchange, "tsym": urllib.parse.quote_plus(tradingsymbol),
                   "strprc": str(strikeprice), "cnt": str(count)}
 
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
-
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        resDict = json.loads(res.text)
-
-        return None if resDict['stat'] != 'Ok' else resDict
+        return self.send_payload(url, values)
 
     def get_security_info(self, exchange, token):
         config = NorenApi.__service_config
@@ -730,16 +611,8 @@ class NorenApi:
         reportmsg(url)
 
         values = {"uid": self.__username, "exch": exchange, "token": token}
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
 
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        resDict = json.loads(res.text)
-
-        return None if resDict['stat'] != 'Ok' else resDict
+        return self.send_payload(url, values)
 
     def get_quotes(self, exchange, token):
         config = NorenApi.__service_config
@@ -749,22 +622,14 @@ class NorenApi:
         reportmsg(url)
 
         values = {"uid": self.__username, "exch": exchange, "token": token}
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
 
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        resDict = json.loads(res.text)
-
-        return None if resDict['stat'] != 'Ok' else resDict
+        return self.send_payload(url, values)
 
     def get_time_price_series(self, exchange, token, starttime=None, endtime=None, interval=None):
-        '''
-        gets the chart data 
+        """
+        gets the chart data
         interval possible values 1, 3, 5 , 10, 15, 30, 60, 120, 240
-        '''
+        """
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -790,17 +655,7 @@ class NorenApi:
         if interval is not None:
             values["intrv"] = str(interval)
 
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
-
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        resDict = json.loads(res.text)
-
-        # error is a json with stat and msg wchih we printed earlier.
-        return None if type(resDict) != list else resDict
+        return self.send_payload(url, values, expected_return_type="list")
 
     def get_daily_price_series(self, exchange, tradingsymbol, startdate=None, enddate=None):
         config = NorenApi.__service_config
@@ -818,28 +673,11 @@ class NorenApi:
         if enddate is None:
             enddate = dt.now().timestamp()
 
-        #
         values = {"uid": self.__username, "sym": '{0}:{1}'.format(exchange, tradingsymbol), "from": str(startdate),
                   "to": str(enddate)}
 
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
-        # payload = json.dumps(values)
-        reportmsg(payload)
-
         headers = {"Content-Type": "application/json; charset=utf-8"}
-        res = requests.post(url, data=payload, headers=headers)
-        reportmsg(res)
-
-        if res.status_code != 200:
-            return None
-
-        if not res.text:
-            return None
-
-        resDict = json.loads(res.text)
-
-        # error is a json with stat and msg wchih we printed earlier.
-        return None if type(resDict) != list else resDict
+        return self.send_payload(url, values, headers=headers)
 
     def get_holdings(self, product_type=None):
         config = NorenApi.__service_config
@@ -853,16 +691,7 @@ class NorenApi:
 
         values = {"uid": self.__username, "actid": self.__accountid, "prd": product_type}
 
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
-
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        resDict = json.loads(res.text)
-
-        return None if type(resDict) != list else resDict
+        return self.send_payload(url, values, expected_return_type="list")
 
     def get_limits(self, product_type=None, segment=None, exchange=None):
         config = NorenApi.__service_config
@@ -882,14 +711,7 @@ class NorenApi:
         if exchange is not None:
             values["exch"] = exchange
 
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
-
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        return json.loads(res.text)
+        return self.send_payload(url, values)
 
     def get_positions(self):
         config = NorenApi.__service_config
@@ -900,16 +722,7 @@ class NorenApi:
 
         values = {"uid": self.__username, "actid": self.__accountid}
 
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
-
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        resDict = json.loads(res.text)
-
-        return None if type(resDict) != list else resDict
+        return self.send_payload(url, values, expected_return_type="list")
 
     def span_calculator(self, actid, positions: list):
         config = NorenApi.__service_config
@@ -918,17 +731,9 @@ class NorenApi:
         reportmsg(url)
 
         senddata = {'actid': self.__accountid, 'pos': positions}
+        values = json.dumps(senddata, default=lambda o: o.encode())
 
-        payload = (
-                f'jData={json.dumps(senddata, default=lambda o: o.encode())}'
-                + f'&jKey={self.__susertoken}'
-        )
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        return json.loads(res.text)
+        return self.send_payload(url, values)
 
     def option_greek(self, expiredate, StrikePrice, SpotPrice, InterestRate, Volatility, OptionType):
         config = NorenApi.__service_config
@@ -941,11 +746,4 @@ class NorenApi:
         values = {"source": "API", "actid": self.__accountid, "exd": expiredate, "strprc": StrikePrice,
                   "sptprc": SpotPrice, "int_rate": InterestRate, "volatility": Volatility, "optt": OptionType}
 
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
-
-        reportmsg(payload)
-
-        res = requests.post(url, data=payload)
-        reportmsg(res.text)
-
-        return json.loads(res.text)
+        return self.send_payload(url, values)

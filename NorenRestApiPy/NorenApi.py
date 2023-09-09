@@ -679,7 +679,7 @@ class NorenApi:
                   "to": str(enddate)}
 
         headers = {"Content-Type": "application/json; charset=utf-8"}
-        return self.send_payload(url, values, headers=headers)
+        return self.send_payload(url, values, headers=headers, expected_return_type="list")
 
     def get_holdings(self, product_type=None):
         config = NorenApi.__service_config

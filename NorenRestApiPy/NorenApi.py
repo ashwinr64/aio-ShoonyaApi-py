@@ -1,15 +1,14 @@
+import asyncio
 import datetime
 import hashlib
 import json
 import logging
-import threading
 import time
 import urllib
 from datetime import datetime as dt
-from time import sleep
 
-import requests
-import websocket
+import aiohttp
+import websockets
 
 logger = logging.getLogger(__name__)
 
@@ -104,142 +103,127 @@ class NorenApi:
         'websocket_endpoint': 'wss://wsendpoint/',
         # 'eoddata_endpoint' : 'http://eodhost/'
     }
-
     def __init__(self, host, websocket):
-        self.__service_config['host'] = host
-        self.__service_config['websocket_endpoint'] = websocket
-        # self.__service_config['eoddata_endpoint'] = eodhost
-
-        self.__websocket = None
-        self.__websocket_connected = False
-        self.__ws_mutex = threading.Lock()
-        self.__on_error = None
-        self.__on_disconnect = None
+        self.__password = None
+        self.__accountid = None
+        self.__username = None
         self.__on_open = None
         self.__subscribe_callback = None
         self.__order_update_callback = None
+        self.__websocket_connected = False  # True -> Connected, False -> Not Connected
+        self.__ws = None
+
+        self.__service_config["host"] = host
+        self.__service_config["websocket_endpoint"] = websocket
+
         self.__subscribers = {}
         self.__market_status_messages = []
         self.__exchange_messages = []
 
-        self.session = requests.Session()
+        self.__session = aiohttp.ClientSession()
+        self.__loop = asyncio.get_event_loop()
 
-    def __ws_run_forever(self):
+        # make susertoken accessible outside the class
+        self.susertoken = None
 
-        while self.__stop_event.is_set() == False:
-            try:
-                self.__websocket.run_forever(ping_interval=3, ping_payload='{"t":"h"}')
-            except Exception as e:
-                logger.warning(f"websocket run forever ended in exception, {e}")
+    def __del__(self):
+        # Close HTTP connection when this object is destroyed
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(self.__session.close())
+            else:
+                loop.run_until_complete(self.__session.close())
+        except Exception as e:
+            logger.error(e)
 
-            sleep(0.1)  # Sleep for 100ms between reconnection.
+    def close_websocket(self):
+        if self.__websocket_connected:
+            self.__websocket_connected = False
 
-    def __ws_send(self, *args, **kwargs):
-        while self.__websocket_connected == False:
-            sleep(0.05)  # sleep for 50ms if websocket is not connected, wait for reconnection
-        with self.__ws_mutex:
-            ret = self.__websocket.send(*args, **kwargs)
-        return ret
+    async def start_websocket(
+            self,
+            subscribe_callback=None,
+            order_update_callback=None,
+            socket_open_callback=None,
+            socket_close_callback=None,
+            socket_error_callback=None,
+    ):
+        self.__order_update_callback = order_update_callback
+        self.__subscribe_callback = subscribe_callback
+        self.__on_open = socket_open_callback
 
-    def __on_close_callback(self, wsapp, close_status_code, close_msg):
-        reportmsg(close_status_code)
-        reportmsg(wsapp)
+        if self.__websocket_connected:
+            return
 
-        self.__websocket_connected = False
-        if self.__on_disconnect:
-            self.__on_disconnect()
+        asyncio.create_task(self.websocket_task_async())
 
-    def __on_open_callback(self, ws=None):
+    async def websocket_task_async(self):
+        url = self.__service_config["websocket_endpoint"]
+        self.__ws = await websockets.connect(url, ping_interval=3)
         self.__websocket_connected = True
+        logger.info("Websocket connected!")
 
+        # Call on open callback
+        await self.__on_open_callback()
+
+        try:
+            while self.__websocket_connected:
+                await asyncio.sleep(0.05)
+                message = await self.__ws.recv()
+                res = json.loads(message)
+
+                if self.__subscribe_callback is not None:
+                    if res["t"] in ["tk", "tf"]:
+                        await self.__subscribe_callback(res)
+                        continue
+                    if res["t"] in ["dk", "df"]:
+                        await self.__subscribe_callback(res)
+                        continue
+
+                if res["t"] == "ck" and res["s"] != "OK":
+                    logger.error(res)
+                    continue
+
+                if (self.__order_update_callback is not None) and res["t"] == "om":
+                    await self.__order_update_callback(res)
+                    continue
+
+                if self.__on_open and res["t"] == "ck" and res["s"] == "OK":
+                    await self.__on_open()
+                    continue
+        except Exception as e:
+            logger.error(e)
+        finally:
+            await self.__ws.close()
+            self.__websocket_connected = False
+
+    async def __on_open_callback(self):
         # prepare the data
         values = {
             "t": "c",
             "uid": self.__username,
             "actid": self.__username,
-            "susertoken": self.__susertoken,
-            "source": 'API',
+            "susertoken": self.susertoken,
+            "source": "API",
         }
         payload = json.dumps(values)
+        reportmsg(payload)
+        await self.__ws.send(payload)
+
+    async def send_payload(self, url, values, is_authorized=True, headers=None):
+        payload = f'jData={json.dumps(values)}'
+        if is_authorized:
+            payload += f'&jKey={self.susertoken}'
 
         reportmsg(payload)
-        self.__ws_send(payload)
 
-        # self.__resubscribe()
+        async with self.__session.post(url, data=payload, headers=headers) as response:
+            response_text = await response.text()
+            reportmsg(response_text)
+            return json.loads(response_text)
 
-    def __on_error_callback(self, ws=None, error=None):
-        if (
-                type(
-                    ws) is not websocket.WebSocketApp):  # This workaround is to solve the websocket_client's compatiblity issue of older versions. ie.0.40.0 which is used in upstox. Now this will work in both 0.40.0 & newer version of websocket_client
-            error = ws
-        if self.__on_error:
-            self.__on_error(error)
-
-    def __on_data_callback(self, ws=None, message=None, data_type=None, continue_flag=None):
-        # print(ws)
-        # print(message)
-        # print(data_type)
-        # print(continue_flag)
-
-        res = json.loads(message)
-
-        if (self.__subscribe_callback is not None):
-            if res['t'] in ['tk', 'tf']:
-                self.__subscribe_callback(res)
-                return
-            if res['t'] in ['dk', 'df']:
-                self.__subscribe_callback(res)
-                return
-
-        if res['t'] == 'ck' and res['s'] != 'OK' and self.__on_error is not None:
-            self.__on_error(res)
-            return
-
-        if res['t'] == 'om' and self.__order_update_callback is not None:
-            self.__order_update_callback(res)
-            return
-
-        if res['t'] == 'ck' and res['s'] == 'OK' and self.__on_open:
-            self.__on_open()
-            return
-
-    def start_websocket(self, subscribe_callback=None,
-                        order_update_callback=None,
-                        socket_open_callback=None,
-                        socket_close_callback=None,
-                        socket_error_callback=None):
-        """ Start a websocket connection for getting live data """
-        self.__on_open = socket_open_callback
-        self.__on_disconnect = socket_close_callback
-        self.__on_error = socket_error_callback
-        self.__subscribe_callback = subscribe_callback
-        self.__order_update_callback = order_update_callback
-        self.__stop_event = threading.Event()
-        url = self.__service_config['websocket_endpoint'].format(access_token=self.__susertoken)
-        reportmsg(f'connecting to {url}')
-
-        self.__websocket = websocket.WebSocketApp(url,
-                                                  on_data=self.__on_data_callback,
-                                                  on_error=self.__on_error_callback,
-                                                  on_close=self.__on_close_callback,
-                                                  on_open=self.__on_open_callback)
-        # th = threading.Thread(target=self.__send_heartbeat)
-        # th.daemon = True
-        # th.start()
-        # if run_in_background is True:
-        self.__ws_thread = threading.Thread(target=self.__ws_run_forever)
-        self.__ws_thread.daemon = True
-        self.__ws_thread.start()
-
-    def close_websocket(self):
-        if self.__websocket_connected == False:
-            return
-        self.__stop_event.set()
-        self.__websocket_connected = False
-        self.__websocket.close()
-        self.__ws_thread.join()
-
-    def login(self, userid, password, twoFA, vendor_code, api_secret, imei):
+    async def login(self, userid, password, twoFA, vendor_code, api_secret, imei):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -261,13 +245,13 @@ class NorenApi:
             "appkey": app_key,
             "imei": imei,
         }
-        res_dict = self.send_payload(url, values, is_authorized=False)
+        res_dict = await self.send_payload(url, values, is_authorized=False)
 
         if res_dict:
             self.__username = userid
             self.__accountid = userid
             self.__password = password
-            self.__susertoken = res_dict['susertoken']
+            self.susertoken = res_dict['susertoken']
 
         return res_dict
 
@@ -276,13 +260,13 @@ class NorenApi:
         self.__username = userid
         self.__accountid = userid
         self.__password = password
-        self.__susertoken = usertoken
+        self.susertoken = usertoken
 
-        reportmsg(f'{userid} session set to : {self.__susertoken}')
+        reportmsg(f'{userid} session set to : {self.susertoken}')
 
         return True
 
-    def forgot_password(self, userid, pan, dob):
+    async def forgot_password(self, userid, pan, dob):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -291,9 +275,9 @@ class NorenApi:
 
         # prepare the data
         values = {"source": "API", "uid": userid, "pan": pan, "dob": dob}
-        return self.send_payload(url, values, is_authorized=False)
+        return await self.send_payload(url, values, is_authorized=False)
 
-    def logout(self):
+    async def logout(self):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -301,56 +285,19 @@ class NorenApi:
         reportmsg(url)
         # prepare the data
         values = {'ordersource': 'API', "uid": self.__username}
-        payload = f'jData={json.dumps(values)}' + f'&jKey={self.__susertoken}'
+        payload = f'jData={json.dumps(values)}' + f'&jKey={self.susertoken}'
 
-        res_dict = self.send_payload(url, values)
+        res_dict = await self.send_payload(url, payload)
 
         if res_dict:
             self.__username = None
             self.__accountid = None
             self.__password = None
-            self.__susertoken = None
+            self.susertoken = None
 
         return res_dict
 
-    def subscribe(self, instrument, feed_type=FeedType.TOUCHLINE):
-        values = {}
-
-        if feed_type == FeedType.TOUCHLINE:
-            values['t'] = 't'
-        elif feed_type == FeedType.SNAPQUOTE:
-            values['t'] = 'd'
-        else:
-            values['t'] = str(feed_type)
-
-        values['k'] = '#'.join(instrument) if type(instrument) == list else instrument
-        data = json.dumps(values)
-
-        # print(data)
-        self.__ws_send(data)
-
-    def unsubscribe(self, instrument, feed_type=FeedType.TOUCHLINE):
-        values = {}
-
-        if (feed_type == FeedType.TOUCHLINE):
-            values['t'] = 'u'
-        elif (feed_type == FeedType.SNAPQUOTE):
-            values['t'] = 'ud'
-
-        values['k'] = '#'.join(instrument) if type(instrument) == list else instrument
-        data = json.dumps(values)
-
-        # print(data)
-        self.__ws_send(data)
-
-    def subscribe_orders(self):
-        values = {'t': 'o', 'actid': self.__accountid}
-        data = json.dumps(values)
-
-        reportmsg(data)
-        self.__ws_send(data)
-
-    def get_watch_list_names(self):
+    async def get_watch_list_names(self):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -358,9 +305,9 @@ class NorenApi:
         reportmsg(url)
         # prepare the data
         values = {'ordersource': 'API', "uid": self.__username}
-        return self.send_payload(url, values)
+        return await self.send_payload(url, values)
 
-    def get_watch_list(self, wlname):
+    async def get_watch_list(self, wlname):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -368,29 +315,9 @@ class NorenApi:
         reportmsg(url)
         # prepare the data
         values = {'ordersource': 'API', "uid": self.__username, "wlname": wlname}
-        return self.send_payload(url, values)
+        return await self.send_payload(url, values)
 
-    def send_payload(self, url, values, expected_return_type=None, is_authorized=True, headers=None):
-        payload = f'jData={json.dumps(values)}'
-        if is_authorized:
-            payload += f'&jKey={self.__susertoken}'
-
-        reportmsg(payload)
-        res = self.session.post(url, data=payload, headers=headers)
-        reportmsg(res.text)
-        res = json.loads(res.text)
-
-        success = None
-        if (
-                expected_return_type == 'list'
-                and type(res) == list
-                or expected_return_type != 'list'
-                and res['stat'] == 'Ok'
-        ):
-            success = True
-        return res if success else None
-
-    def add_watch_list_scrip(self, wlname, instrument):
+    async def add_watch_list_scrip(self, wlname, instrument):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -405,9 +332,9 @@ class NorenApi:
             if type(instrument) == list
             else instrument,
         }
-        return self.send_payload(url, values)
+        return await self.send_payload(url, values)
 
-    def delete_watch_list_scrip(self, wlname, instrument):
+    async def delete_watch_list_scrip(self, wlname, instrument):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -422,12 +349,13 @@ class NorenApi:
             if type(instrument) == list
             else instrument,
         }
-        return self.send_payload(url, values)
+        return await self.send_payload(url, values)
 
-    def place_order(self, buy_or_sell, product_type,
-                    exchange, tradingsymbol, quantity, discloseqty,
-                    price_type, price=0.0, trigger_price=None,
-                    retention='DAY', amo='NO', remarks=None, bookloss_price=0.0, bookprofit_price=0.0, trail_price=0.0):
+    async def place_order(self, buy_or_sell, product_type,
+                          exchange, tradingsymbol, quantity, discloseqty,
+                          price_type, price=0.0, trigger_price=None,
+                          retention='DAY', amo='NO', remarks=None, bookloss_price=0.0, bookprofit_price=0.0,
+                          trail_price=0.0):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -454,16 +382,16 @@ class NorenApi:
             if trail_price != 0.0:
                 values["trailprc"] = str(trail_price)
 
-        return self.send_payload(url, values)
+        return await self.send_payload(url, values)
 
-    def modify_order(self, orderno, exchange, tradingsymbol, newquantity,
-                     newprice_type, newprice=0.0, newtrigger_price=None, bookloss_price=0.0, bookprofit_price=0.0,
-                     trail_price=0.0):
+    async def modify_order(self, orderno, exchange, tradingsymbol, newquantity,
+                           newprice_type, newprice=0.0, newtrigger_price=None, bookloss_price=0.0, bookprofit_price=0.0,
+                           trail_price=0.0):
         config = NorenApi.__service_config
 
         # prepare the uri
         url = f"{config['host']}{config['routes']['modifyorder']}"
-        print(url)
+        # print(url)
 
         # prepare the data
         values = {'ordersource': 'API', "uid": self.__username, "actid": self.__accountid, "norenordno": str(orderno),
@@ -487,14 +415,14 @@ class NorenApi:
         if bookprofit_price != 0.0:
             values["bpprc"] = str(bookprofit_price)
 
-        return self.send_payload(url, values)
+        return await self.send_payload(url, values)
 
-    def cancel_order(self, orderno):
+    async def cancel_order(self, orderno):
         config = NorenApi.__service_config
 
         # prepare the uri
         url = f"{config['host']}{config['routes']['cancelorder']}"
-        print(url)
+        # print(url)
 
         # prepare the data
         values = {
@@ -502,9 +430,9 @@ class NorenApi:
             "uid": self.__username,
             "norenordno": str(orderno),
         }
-        return self.send_payload(url, values)
+        return await self.send_payload(url, values)
 
-    def exit_order(self, orderno, product_type):
+    async def exit_order(self, orderno, product_type):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -518,12 +446,13 @@ class NorenApi:
             "norenordno": orderno,
             "prd": product_type,
         }
-        return self.send_payload(url, values)
+        return await self.send_payload(url, values)
 
-    def position_product_conversion(self, exchange, tradingsymbol, quantity, new_product_type, previous_product_type,
-                                    buy_or_sell, day_or_cf):
+    async def position_product_conversion(self, exchange, tradingsymbol, quantity, new_product_type,
+                                          previous_product_type,
+                                          buy_or_sell, day_or_cf):
         '''
-        Coverts a day or carryforward position from one product to another. 
+        Coverts a day or carryforward position from one product to another.
         '''
         config = NorenApi.__service_config
 
@@ -536,9 +465,9 @@ class NorenApi:
                   "tsym": urllib.parse.quote_plus(tradingsymbol), "qty": str(quantity), "prd": new_product_type,
                   "prevprd": previous_product_type, "trantype": buy_or_sell, "postype": day_or_cf}
 
-        return self.send_payload(url, values)
+        return await self.send_payload(url, values)
 
-    def single_order_history(self, orderno):
+    async def single_order_history(self, orderno):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -548,9 +477,9 @@ class NorenApi:
         # prepare the data
         values = {'ordersource': 'API', "uid": self.__username, "norenordno": orderno}
 
-        return self.send_payload(url, values, expected_return_type="list")
+        return await self.send_payload(url, values)
 
-    def get_order_book(self):
+    async def get_order_book(self):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -560,9 +489,9 @@ class NorenApi:
         # prepare the data
         values = {'ordersource': 'API', "uid": self.__username}
 
-        return self.send_payload(url, values, expected_return_type="list")
+        return await self.send_payload(url, values)
 
-    def get_trade_book(self):
+    async def get_trade_book(self):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -576,9 +505,9 @@ class NorenApi:
             "actid": self.__accountid,
         }
 
-        return self.send_payload(url, values, expected_return_type="list")
+        return await self.send_payload(url, values)
 
-    def searchscrip(self, exchange, searchtext):
+    async def searchscrip(self, exchange, searchtext):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -591,9 +520,9 @@ class NorenApi:
 
         values = {"uid": self.__username, "exch": exchange, "stext": urllib.parse.quote_plus(searchtext)}
 
-        return self.send_payload(url, values)
+        return await self.send_payload(url, values)
 
-    def get_option_chain(self, exchange, tradingsymbol, strikeprice, count=2):
+    async def get_option_chain(self, exchange, tradingsymbol, strikeprice, count=2):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -603,9 +532,9 @@ class NorenApi:
         values = {"uid": self.__username, "exch": exchange, "tsym": urllib.parse.quote_plus(tradingsymbol),
                   "strprc": str(strikeprice), "cnt": str(count)}
 
-        return self.send_payload(url, values)
+        return await self.send_payload(url, values)
 
-    def get_security_info(self, exchange, token):
+    async def get_security_info(self, exchange, token):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -614,9 +543,9 @@ class NorenApi:
 
         values = {"uid": self.__username, "exch": exchange, "token": token}
 
-        return self.send_payload(url, values)
+        return await self.send_payload(url, values)
 
-    def get_quotes(self, exchange, token):
+    async def get_quotes(self, exchange, token):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -625,9 +554,9 @@ class NorenApi:
 
         values = {"uid": self.__username, "exch": exchange, "token": token}
 
-        return self.send_payload(url, values)
+        return await self.send_payload(url, values)
 
-    def get_time_price_series(self, exchange, token, starttime=None, endtime=None, interval=None):
+    async def get_time_price_series(self, exchange, token, starttime=None, endtime=None, interval=None):
         """
         gets the chart data
         interval possible values 1, 3, 5 , 10, 15, 30, 60, 120, 240
@@ -657,9 +586,9 @@ class NorenApi:
         if interval is not None:
             values["intrv"] = str(interval)
 
-        return self.send_payload(url, values, expected_return_type="list")
+        return await self.send_payload(url, values)
 
-    def get_daily_price_series(self, exchange, tradingsymbol, startdate=None, enddate=None):
+    async def get_daily_price_series(self, exchange, tradingsymbol, startdate=None, enddate=None):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -679,9 +608,9 @@ class NorenApi:
                   "to": str(enddate)}
 
         headers = {"Content-Type": "application/json; charset=utf-8"}
-        return self.send_payload(url, values, headers=headers, expected_return_type="list")
+        return await self.send_payload(url, values, headers=headers)
 
-    def get_holdings(self, product_type=None):
+    async def get_holdings(self, product_type=None):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -693,9 +622,9 @@ class NorenApi:
 
         values = {"uid": self.__username, "actid": self.__accountid, "prd": product_type}
 
-        return self.send_payload(url, values, expected_return_type="list")
+        return await self.send_payload(url, values)
 
-    def get_limits(self, product_type=None, segment=None, exchange=None):
+    async def get_limits(self, product_type=None, segment=None, exchange=None):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -713,9 +642,9 @@ class NorenApi:
         if exchange is not None:
             values["exch"] = exchange
 
-        return self.send_payload(url, values)
+        return await self.send_payload(url, values)
 
-    def get_positions(self):
+    async def get_positions(self):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -724,9 +653,9 @@ class NorenApi:
 
         values = {"uid": self.__username, "actid": self.__accountid}
 
-        return self.send_payload(url, values, expected_return_type="list")
+        return await self.send_payload(url, values)
 
-    def span_calculator(self, actid, positions: list):
+    async def span_calculator(self, actid, positions: list):
         config = NorenApi.__service_config
         # prepare the uri
         url = f"{config['host']}{config['routes']['span_calculator']}"
@@ -735,9 +664,9 @@ class NorenApi:
         senddata = {'actid': self.__accountid, 'pos': positions}
         values = json.dumps(senddata, default=lambda o: o.encode())
 
-        return self.send_payload(url, values)
+        return await self.send_payload(url, values)
 
-    def option_greek(self, expiredate, StrikePrice, SpotPrice, InterestRate, Volatility, OptionType):
+    async def option_greek(self, expiredate, StrikePrice, SpotPrice, InterestRate, Volatility, OptionType):
         config = NorenApi.__service_config
 
         # prepare the uri
@@ -748,4 +677,4 @@ class NorenApi:
         values = {"source": "API", "actid": self.__accountid, "exd": expiredate, "strprc": StrikePrice,
                   "sptprc": SpotPrice, "int_rate": InterestRate, "volatility": Volatility, "optt": OptionType}
 
-        return self.send_payload(url, values)
+        return await self.send_payload(url, values)
